@@ -1,7 +1,7 @@
 const $ = (s)=>document.querySelector(s);
 const $$ = (s)=>Array.from(document.querySelectorAll(s));
 
-let activeTab = "majors";
+let activeTab = "uptrend";
 let tf = "15m";
 // Signals are always visible (no Show/Hide toggle).
 const showSignals = true;
@@ -97,17 +97,11 @@ async function api(path){
 }
 
 function currentListEndpoint(){
-  if (activeTab === "majors") return `/api/list/majors?tf=${encodeURIComponent(tf)}`;
-  if (activeTab === "trending") return `/api/list/trending_low_risk?tf=${encodeURIComponent(tf)}`;
   if (activeTab === "uptrend") return `/api/list/uptrend_signal?tf=${encodeURIComponent(tf)}&potential=${encodeURIComponent(potentialFilter)}`;
   if (activeTab === "smart") return `/api/list/smart_money?tf=${encodeURIComponent(tf)}`;
   if (activeTab === "whale") return `/api/list/whale_alert?tf=${encodeURIComponent(tf)}`;
   if (activeTab === "hot") return `/api/list/hot_buys?tf=${encodeURIComponent(tf)}`;
-  if (activeTab === "boosted") return `/api/list/boosted?tf=${encodeURIComponent(tf)}`;
-  if (activeTab === "volume") return `/api/list/top_volume?tf=${encodeURIComponent(tf)}`;
-  if (activeTab === "liq") return `/api/list/high_liquidity?tf=${encodeURIComponent(tf)}`;
-  if (activeTab === "risky") return `/api/list/risky?tf=${encodeURIComponent(tf)}`;
-  return `/api/list/majors?tf=${encodeURIComponent(tf)}`;
+  return `/api/list/uptrend_signal?tf=${encodeURIComponent(tf)}&potential=${encodeURIComponent(potentialFilter)}`;
 }
 
 function applyRiskFilter(items){
@@ -199,6 +193,7 @@ function renderCards(items){
         <div class="kv"><div class="k">Liquidity</div><div class="v">${fmtUSD(liq)}</div></div>
         <div class="kv"><div class="k">Vol (24h)</div><div class="v">${fmtUSD(vol24)}</div></div>
         <div class="kv"><div class="k">MC</div><div class="v">${fmtUSD(mc)}</div></div>
+        <div class="kv"><div class="k">Signal MC</div><div class="v">${fmtUSD(it?.signalMeta?.firstSignalMc)}</div></div>
         <div class="kv"><div class="k">DEX</div><div class="v">${(p?.dexId || "—").toUpperCase?.() || "—"}</div></div>
       </div>
     `;
@@ -279,6 +274,7 @@ async function openDetail(address){
         <div class="kv"><div class="k">Liquidity</div><div class="v">${fmtUSD(p?.liquidity?.usd)}</div></div>
         <div class="kv"><div class="k">Vol (24h)</div><div class="v">${fmtUSD(p?.volume?.h24)}</div></div>
         <div class="kv"><div class="k">MC</div><div class="v">${fmtUSD(p?.marketCap)}</div></div>
+        <div class="kv"><div class="k">Signal MC</div><div class="v">${fmtUSD(data?.signalMeta?.firstSignalMc)}</div></div>
         <div class="kv"><div class="k">Buys/Sells (15m)</div><div class="v">${fmtNum(p?.txns?.m15?.buys)} / ${fmtNum(p?.txns?.m15?.sells)}</div></div>
       </div>
 
