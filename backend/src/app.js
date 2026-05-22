@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
+const fs = require("fs");
 global.fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
 const app = express();
@@ -28,6 +29,115 @@ const mcBlack = new Set();
 
 // Smart-money continuity tracker (avoid one-tick spikes).
 const smartSeen = new Map(); // address -> { streak, lastScore, ts }
+
+const SIGNAL_META_FILE = path.join(__dirname, "..", "signal_meta.json");
+const SIGNAL_NOTIFY_FILE = path.join(__dirname, "..", "signal_notify.json");
+const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
+const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || "").trim();
+
+function readSignalMeta(){
+  try{
+    const raw = fs.readFileSync(SIGNAL_META_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  }catch(_){
+    return {};
+  }
+}
+
+function writeSignalMeta(meta){
+  try{ fs.writeFileSync(SIGNAL_META_FILE, JSON.stringify(meta, null, 2)); }catch(_){/* ignore */}
+}
+
+const signalMeta = readSignalMeta();
+function getOrCreateSignalMeta(address, bestPair){
+  const addr = String(address || "");
+  if (!addr) return null;
+  const curMc = safeNum(bestPair?.marketCap);
+  if (!signalMeta[addr] && curMc > 0){
+    signalMeta[addr] = { firstSignalMc: curMc, firstSeenAt: Date.now() };
+    writeSignalMeta(signalMeta);
+  }
+  return signalMeta[addr] || null;
+}
+
+function attachSignalMeta(items){
+  return items.map((x)=> ({ ...x, signalMeta: getOrCreateSignalMeta(x.address, x.bestPair) }));
+}
+
+function readSignalNotify(){
+  try{
+    const raw = fs.readFileSync(SIGNAL_NOTIFY_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  }catch(_){
+    return {};
+  }
+}
+
+function writeSignalNotify(meta){
+  try{ fs.writeFileSync(SIGNAL_NOTIFY_FILE, JSON.stringify(meta, null, 2)); }catch(_){/* ignore */}
+}
+
+const signalNotify = readSignalNotify();
+
+function formatTelegramSignalMessage(signalType, item){
+  const ident = item?.ident || {};
+  const pair = item?.bestPair || {};
+  const sym = ident.symbol || "—";
+  const name = ident.name || "Token";
+  const addr = ident.address || item?.address || "—";
+  const mc = safeNum(item?.signalMeta?.firstSignalMc || pair?.marketCap);
+  const liq = safeNum(pair?.liquidity?.usd);
+  const vol = safeNum(pair?.volume?.h24);
+  const dex = String(pair?.dexId || "—").toUpperCase();
+  const dsUrl = pair?.url || (addr !== "—" ? `https://dexscreener.com/solana/${addr}` : "");
+  return [
+    `🚨 *New ${signalType} Signal*`,
+    `*${name}* (${sym})`,
+    `CA: \`${addr}\``,
+    `Signal MC: $${Math.round(mc).toLocaleString("en-US")}`,
+    `Liquidity: $${Math.round(liq).toLocaleString("en-US")}`,
+    `Vol (24h): $${Math.round(vol).toLocaleString("en-US")}`,
+    `DEX: ${dex}`,
+    dsUrl ? `[DexScreener](${dsUrl})` : ""
+  ].filter(Boolean).join("\n");
+}
+
+async function sendTelegramMessage(text){
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return false;
+  const url = `https://api.telegram.org/bot${encodeURIComponent(TELEGRAM_BOT_TOKEN)}/sendMessage`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type":"application/json" },
+    body: JSON.stringify({
+      chat_id: TELEGRAM_CHAT_ID,
+      text,
+      parse_mode: "Markdown"
+    })
+  });
+  return res.ok;
+}
+
+async function notifyNewSignals(signalType, items){
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  for (const item of items){
+    const addr = String(item?.address || "");
+    if (!addr) continue;
+    const key = `${signalType}:${addr}`;
+    if (signalNotify[key]?.sentAt) continue;
+    try{
+      const ok = await sendTelegramMessage(formatTelegramSignalMessage(signalType, item));
+      if (ok){
+        signalNotify[key] = { sentAt: Date.now(), address: addr, signalType };
+        writeSignalNotify(signalNotify);
+      }
+    }catch(_){
+      // ignore telegram failures to avoid breaking API responses
+    }
+  }
+}
+
 
 async function fetchJson(url, ttlMs = 15000){
   const cached = getCached(url);
@@ -591,11 +701,12 @@ app.get("/api/list/high_liquidity", async (req,res)=>{
 app.get("/api/list/whale_alert", async (req,res)=>{
   try{
     const seed = await boostedSeed(40);
-    const items = seed
+    const items = attachSignalMeta(seed
       .map(x => ({ ...x, whaleScore: x.whale?.whaleScore || 0 }))
       .filter(x => x.whaleScore >= 45 && x.risk.riskLabel !== "HIGH")
       .sort((a,b)=> (b.whaleScore - a.whaleScore))
-      .slice(0, 30);
+      .slice(0, 30));
+    await notifyNewSignals("WHALE", items);
     res.json({ count: items.length, items });
   }catch(e){
     res.status(500).json({ error: e.message });
@@ -626,12 +737,13 @@ app.get("/api/list/smart_money", async (req,res)=>{
         return { ...x, smartScore, smartStreak: streak };
       });
 
-    const items = withStreak
+    const items = attachSignalMeta(withStreak
       .filter(x => x.risk.riskLabel !== "HIGH")
       // Stability gate: show immediately if very strong; otherwise require 2 ticks.
       .filter(x => (x.smartScore >= 70) || (x.smartScore >= 55 && x.smartStreak >= 2))
       .sort((a,b)=> (b.smartScore + (b.smartStreak>=2?6:0)) - (a.smartScore + (a.smartStreak>=2?6:0)))
-      .slice(0, 30);
+      .slice(0, 30));
+    await notifyNewSignals("SMART", items);
     res.json({ count: items.length, items });
   }catch(e){
     res.status(500).json({ error: e.message });
@@ -641,7 +753,7 @@ app.get("/api/list/smart_money", async (req,res)=>{
 app.get("/api/list/hot_buys", async (req,res)=>{
   try{
     const seed = await boostedSeed(42);
-    const items = seed
+    const items = attachSignalMeta(seed
     .filter(x => !isMcBlacklisted(x.address))
     .map(x=>{
       const b5 = safeNum(x.bestPair?.txns?.m5?.buys);
@@ -678,7 +790,8 @@ app.get("/api/list/hot_buys", async (req,res)=>{
     .filter(x => (x.dump?.dumpRisk || "LOW") !== "HIGH")
     .filter(x => !x.risk.flags.includes("FALLING_KNIFE"))
     .sort((a,b)=> b.hotScore - a.hotScore)
-    .slice(0, 30);
+    .slice(0, 30));
+    await notifyNewSignals("HOT", items);
     res.json({ count: items.length, items });
   }catch(e){
     res.status(500).json({ error: e.message });
@@ -706,7 +819,7 @@ app.get("/api/list/uptrend_signal", async (req,res)=>{
     const potential = String(req.query.potential || "MED");
     const seed = await boostedSeed(55);
 
-    const items = seed.map(x=>{
+    const items = attachSignalMeta(seed.map(x=>{
       const pot = computePotential(x.bestPair, tf);
       return { ...x, potential: pot };
     })
@@ -759,8 +872,8 @@ app.get("/api/list/uptrend_signal", async (req,res)=>{
       if (r !== 0) return r;
       return trendChange(b.bestPair, tf) - trendChange(a.bestPair, tf);
     })
-    .slice(0, 30);
-
+    .slice(0, 30));
+    await notifyNewSignals("UPTREND", items);
     res.json({ count: items.length, items });
   }catch(e){
     res.status(500).json({ error: e.message });
