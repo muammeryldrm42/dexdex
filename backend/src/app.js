@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
+const fs = require("fs");
 global.fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
 const app = express();
@@ -28,6 +29,39 @@ const mcBlack = new Set();
 
 // Smart-money continuity tracker (avoid one-tick spikes).
 const smartSeen = new Map(); // address -> { streak, lastScore, ts }
+
+const SIGNAL_META_FILE = path.join(__dirname, "..", "signal_meta.json");
+
+function readSignalMeta(){
+  try{
+    const raw = fs.readFileSync(SIGNAL_META_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  }catch(_){
+    return {};
+  }
+}
+
+function writeSignalMeta(meta){
+  try{ fs.writeFileSync(SIGNAL_META_FILE, JSON.stringify(meta, null, 2)); }catch(_){/* ignore */}
+}
+
+const signalMeta = readSignalMeta();
+function getOrCreateSignalMeta(address, bestPair){
+  const addr = String(address || "");
+  if (!addr) return null;
+  const curMc = safeNum(bestPair?.marketCap);
+  if (!signalMeta[addr] && curMc > 0){
+    signalMeta[addr] = { firstSignalMc: curMc, firstSeenAt: Date.now() };
+    writeSignalMeta(signalMeta);
+  }
+  return signalMeta[addr] || null;
+}
+
+function attachSignalMeta(items){
+  return items.map((x)=> ({ ...x, signalMeta: getOrCreateSignalMeta(x.address, x.bestPair) }));
+}
+
 
 async function fetchJson(url, ttlMs = 15000){
   const cached = getCached(url);
@@ -596,7 +630,7 @@ app.get("/api/list/whale_alert", async (req,res)=>{
       .filter(x => x.whaleScore >= 45 && x.risk.riskLabel !== "HIGH")
       .sort((a,b)=> (b.whaleScore - a.whaleScore))
       .slice(0, 30);
-    res.json({ count: items.length, items });
+    res.json({ count: items.length, items: attachSignalMeta(items) });
   }catch(e){
     res.status(500).json({ error: e.message });
   }
@@ -632,7 +666,7 @@ app.get("/api/list/smart_money", async (req,res)=>{
       .filter(x => (x.smartScore >= 70) || (x.smartScore >= 55 && x.smartStreak >= 2))
       .sort((a,b)=> (b.smartScore + (b.smartStreak>=2?6:0)) - (a.smartScore + (a.smartStreak>=2?6:0)))
       .slice(0, 30);
-    res.json({ count: items.length, items });
+    res.json({ count: items.length, items: attachSignalMeta(items) });
   }catch(e){
     res.status(500).json({ error: e.message });
   }
@@ -679,7 +713,7 @@ app.get("/api/list/hot_buys", async (req,res)=>{
     .filter(x => !x.risk.flags.includes("FALLING_KNIFE"))
     .sort((a,b)=> b.hotScore - a.hotScore)
     .slice(0, 30);
-    res.json({ count: items.length, items });
+    res.json({ count: items.length, items: attachSignalMeta(items) });
   }catch(e){
     res.status(500).json({ error: e.message });
   }
@@ -761,7 +795,7 @@ app.get("/api/list/uptrend_signal", async (req,res)=>{
     })
     .slice(0, 30);
 
-    res.json({ count: items.length, items });
+    res.json({ count: items.length, items: attachSignalMeta(items) });
   }catch(e){
     res.status(500).json({ error: e.message });
   }
